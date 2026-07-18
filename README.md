@@ -302,7 +302,7 @@ Create a `.env` file in the root directory then copy .env.example
 
 1. Clone the repository
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/nada3zz/user-profile
    cd user-profiles
    ```
 
@@ -364,6 +364,3 @@ For detailed API task breakdown and prioritization, see postman-collection or [A
 - Middleware execution pipeline
 - Security and validation checklist
 - Error handling flow
-
-
-```
