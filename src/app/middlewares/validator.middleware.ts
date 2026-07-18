@@ -3,14 +3,14 @@ import Joi from "joi";
 import { ValidationException } from "../../utils/exceptions";
 
 const convertToObject = (
-  error: Joi.ValidationError
+  error: Joi.ValidationError,
 ): Record<string, string> => {
   const errorMessages = error.details.reduce(
     (result: Record<string, string>, item) => {
       result[item.path[0]] = item.message;
       return result;
     },
-    {}
+    {},
   );
   return errorMessages;
 };
@@ -20,11 +20,11 @@ const validator =
   (req: Request, res: Response, next: NextFunction): void => {
     const schema = Joi.object(schemaToValidate);
 
-    const { query, body, method, params } = req;
+    const { body, params } = req;
 
     const { error } = schema.validate(
       { ...body, ...params },
-      { abortEarly: false }
+      { abortEarly: false },
     );
 
     if (error) {
@@ -34,4 +34,18 @@ const validator =
     next();
   };
 
-export { validator };
+const queryValidator =
+  (schemaToValidate: Joi.ObjectSchema) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    const schema = Joi.object(schemaToValidate);
+
+    const { error } = schema.validate(req.query, { abortEarly: false });
+
+    if (error) {
+      const validationErrorObj = convertToObject(error);
+      return next(new ValidationException(validationErrorObj));
+    }
+    next();
+  };
+
+export { validator, queryValidator };
