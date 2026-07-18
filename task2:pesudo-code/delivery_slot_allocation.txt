@@ -1,0 +1,253 @@
+====================================================================
+ DELIVERY SLOT ALLOCATION - BACKEND LOGIC (DETAILED PSEUDOCODE)
+====================================================================
+
+This covers the core allocation flow a backend service would expose
+to the customer-facing app: fetching slot availability, booking a
+slot, and falling back to alternatives when the preferred slot is
+full. The main design concern here isn't the happy path - it's that
+slots are a shared resource being hit by many customers at once, so
+the booking step has to be safe under concurrency (no two customers
+walking away thinking they got the last spot).
+
+--------------------------------------------------------------------
+DATA MODEL (just enough to reason about the logic below)
+--------------------------------------------------------------------
+
+DeliverySlot:
+    slot_id
+    start_time
+    end_time
+    max_capacity        # total orders this slot can hold
+    booked_count         # how many orders are currently assigned
+    status                # DERIVED: OPEN | FULL | CLOSED (cut-off passed)
+
+Booking:
+    booking_id
+    order_id
+    slot_id
+    customer_id
+    created_at
+    state                 # CONFIRMED | CANCELLED
+
+--------------------------------------------------------------------
+1. FETCH AVAILABLE SLOTS (for rendering the slot picker in the app)
+--------------------------------------------------------------------
+
+function getAvailableSlots(delivery_date, region):
+
+    if delivery_date is empty or region is empty:
+        return Error("delivery_date and region are required")
+
+    all_slots = fetchSlotsFromDB(delivery_date, region)
+
+    if all_slots is empty:
+        return Error("No delivery slots configured for this date/region")
+
+    result_list = []
+
+    for each slot in all_slots:
+
+        # A slot can be technically "not full" but still unbookable
+        # if the cut-off time for that window has already passed.
+        if current_time() >= slot.cutoff_time:
+            slot.status = "CLOSED"
+
+        else if slot.booked_count >= slot.max_capacity:
+            slot.status = "FULL"
+
+        else:
+            slot.status = "OPEN"
+
+        result_list.append({
+            slot_id: slot.slot_id,
+            time_range: [slot.start_time, slot.end_time],
+            status: slot.status,
+            spots_left: max(0, slot.max_capacity - slot.booked_count)
+        })
+
+    return result_list
+    # App uses "status" to decide which slots render as clickable
+    # vs. greyed out. spots_left is optional but useful for
+    # "Only 2 spots left" style urgency messaging.
+
+
+--------------------------------------------------------------------
+2. BOOK A SLOT (the critical, concurrency-sensitive path)
+--------------------------------------------------------------------
+# Multiple customers can hit this at the same instant for the same
+# slot. A naive "read count, check < max, then write" is a classic
+# race condition - two requests can both read booked_count = 4/5,
+# both pass the check, and both write, overbooking the slot.
+#
+# The fix: don't check-then-write in application memory. Push the
+# check into a single atomic operation at the data layer (a
+# conditional update, or a row lock + transaction). Below I express
+# it with a transaction + row lock, which maps cleanly onto most
+# relational DBs (SELECT ... FOR UPDATE), but the same logic works
+# with an atomic conditional update if using a NoSQL/KV store.
+
+function bookSlot(order_id, customer_id, preferred_slot_id):
+
+    if order_id is empty or customer_id is empty or preferred_slot_id is empty:
+        return Error("Missing required booking fields")
+
+    # Guard against duplicate submissions (double-tap on the app,
+    # retried request after a timeout, etc.)
+    existing_booking = findActiveBookingForOrder(order_id)
+    if existing_booking exists:
+        return Success(existing_booking, message: "Order already has a confirmed slot")
+
+    booking_result = attemptBooking(order_id, customer_id, preferred_slot_id)
+
+    if booking_result.success:
+        return Success(booking_result.booking, message: "Slot confirmed")
+
+    # Preferred slot didn't make it - could be FULL, CLOSED, or a
+    # legitimate race loss (someone else took the last spot a
+    # millisecond earlier). Either way, degrade gracefully instead
+    # of just returning an error to the customer.
+    alternatives = findAlternativeSlots(preferred_slot_id, limit: 3)
+
+    if alternatives is empty:
+        return Failure(
+            reason: booking_result.reason,
+            message: "This slot is no longer available and no nearby alternatives were found"
+        )
+
+    return Failure(
+        reason: booking_result.reason,
+        message: "This slot just filled up",
+        suggested_slots: alternatives
+    )
+
+
+function attemptBooking(order_id, customer_id, slot_id):
+    # This whole block runs as a single DB transaction with a row
+    # lock on the slot record, so concurrent requests for the same
+    # slot are serialized rather than racing each other.
+
+    begin_transaction()
+
+    slot = lockAndFetchSlot(slot_id)   # SELECT ... FOR UPDATE
+
+    if slot does not exist:
+        rollback_transaction()
+        return { success: false, reason: "SLOT_NOT_FOUND" }
+
+    if current_time() >= slot.cutoff_time:
+        rollback_transaction()
+        return { success: false, reason: "SLOT_CLOSED" }
+
+    if slot.booked_count >= slot.max_capacity:
+        rollback_transaction()
+        return { success: false, reason: "SLOT_FULL" }
+
+    # Safe to book - we're still holding the lock, so no other
+    # transaction can have changed booked_count underneath us.
+    slot.booked_count = slot.booked_count + 1
+    saveSlot(slot)
+
+    booking = createBookingRecord(order_id, customer_id, slot_id, state: "CONFIRMED")
+
+    commit_transaction()
+
+    return { success: true, booking: booking }
+
+
+--------------------------------------------------------------------
+3. SUGGEST ALTERNATIVE SLOTS
+--------------------------------------------------------------------
+
+function findAlternativeSlots(reference_slot_id, limit):
+
+    reference_slot = fetchSlot(reference_slot_id)
+    if reference_slot does not exist:
+        return []
+
+    candidate_slots = fetchSlotsFromDB(
+        delivery_date: reference_slot.delivery_date,
+        region: reference_slot.region
+    )
+
+    open_candidates = []
+
+    for each slot in candidate_slots:
+        if slot.slot_id == reference_slot_id:
+            continue                      # skip the one we already know is full
+
+        if current_time() >= slot.cutoff_time:
+            continue                      # already closed, don't suggest it
+
+        if slot.booked_count >= slot.max_capacity:
+            continue                      # also full, skip
+
+        open_candidates.append(slot)
+
+    # Prioritize slots closest in time to what the customer
+    # originally wanted - that's the most useful suggestion, not
+    # just whatever has the most free space.
+    sort open_candidates by absolute_time_difference(slot.start_time, reference_slot.start_time)
+
+    return first `limit` items of open_candidates
+
+
+--------------------------------------------------------------------
+4. CANCEL A BOOKING (needed to keep booked_count honest over time)
+--------------------------------------------------------------------
+
+function cancelBooking(booking_id):
+
+    begin_transaction()
+
+    booking = lockAndFetchBooking(booking_id)
+
+    if booking does not exist or booking.state == "CANCELLED":
+        rollback_transaction()
+        return Error("Booking not found or already cancelled")
+
+    slot = lockAndFetchSlot(booking.slot_id)
+
+    booking.state = "CANCELLED"
+    saveBooking(booking)
+
+    slot.booked_count = max(0, slot.booked_count - 1)
+    saveSlot(slot)
+
+    commit_transaction()
+
+    return Success(message: "Booking cancelled, slot capacity released")
+
+
+--------------------------------------------------------------------
+NOTES ON REAL-TIME FEEDBACK TO THE APP
+--------------------------------------------------------------------
+- getAvailableSlots is meant to be called every time the picker
+  screen loads, and ideally again right before submission, so the
+  displayed state doesn't go stale between "screen opened" and
+  "customer taps submit."
+- bookSlot is designed to return fast with a definitive outcome
+  (confirmed, or failed + alternatives) in one round trip, rather
+  than making the app poll for a result. The app just needs to
+  render whatever comes back.
+- Because the actual capacity check happens inside the locked
+  transaction in attemptBooking, the getAvailableSlots response the
+  customer saw a few seconds earlier is treated as advisory, not
+  authoritative - the transaction is the real source of truth. This
+  is what prevents the double-booking scenario.
+
+--------------------------------------------------------------------
+EXAMPLE USAGE
+--------------------------------------------------------------------
+
+slots = getAvailableSlots(delivery_date: "2026-07-20", region: "Cairo")
+# customer sees slots, taps 5-6 PM
+
+response = bookSlot(order_id: "ORD1001", customer_id: "CUST55", preferred_slot_id: "SLOT_5_6PM")
+
+if response.success:
+    print("Booked:", response.booking.slot_id)
+else:
+    print(response.message)
+    if response.suggested_slots is not empty:
+        print("Try one of these instead:", response.suggested_slots)
