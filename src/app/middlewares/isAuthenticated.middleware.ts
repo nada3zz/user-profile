@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { TokenExpiredError, JsonWebTokenError } from "jsonwebtoken";
 import {
   ForbiddenException,
   UnauthorizedException,
@@ -21,13 +22,24 @@ const isAuthenticated = (
   }
 
   const accessToken = authHeader.split(" ")[1];
-  const user = verifyJwt(accessToken);
 
-  if (user) {
+  try {
+    const user = verifyJwt(accessToken);
+
+    if (!user) {
+      throw new ForbiddenException("Forbidden Resource");
+    }
+
     req.user = user;
     next();
-  } else {
-    throw new ForbiddenException("Forbidden Resource");
+  } catch (err) {
+    if (err instanceof TokenExpiredError) {
+      throw new UnauthorizedException("Access token expired");
+    }
+    if (err instanceof JsonWebTokenError) {
+      throw new UnauthorizedException("Invalid token");
+    }
+    throw err;
   }
 };
 
