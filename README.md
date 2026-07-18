@@ -365,12 +365,5 @@ For detailed API task breakdown and prioritization, see postman-collection or [A
 - Security and validation checklist
 - Error handling flow
 
-## Contributing
-
-1. Follow the established code structure
-2. Add proper JSDoc comments
-3. Validate all inputs
-4. Handle errors appropriately
-5. Write tests for new features
 
 ```
