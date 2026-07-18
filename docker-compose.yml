@@ -1,0 +1,39 @@
+networks:
+  my-network:
+    driver: bridge
+
+services:
+  db:
+    container_name: db
+    restart: always
+    image: mongo:latest
+    volumes:
+      - ~/mongo-databases/:/data/db
+    networks:
+      - my-network
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    expose:
+      - "27017"
+
+  api:
+    container_name: api-mongo
+    depends_on:
+      - db
+    restart: always
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+      - /usr/src/app/dist
+    networks:
+      - my-network
+    environment:
+      PORT: 3000
+      MONGO_URI: ${MONGO_URI}
+      NODE_ENV: ${NODE_ENV:-development}
+    build: .
+    ports:
+      - "3000:3000"
