@@ -358,7 +358,7 @@ npm run seed                   # Seed database with sample data
 
 ## API Documentation
 
-For detailed API task breakdown and prioritization, see [API_BREAKDOWN.md](API_BREAKDOWN.md) which includes:
+For detailed API task breakdown and prioritization, see postman-collection or [API_BREAKDOWN.md](API_BREAKDOWN.md) which includes:
 - Task decomposition and prioritization (P0, P1, P2)
 - Request/response flow documentation
 - Middleware execution pipeline
@@ -373,11 +373,4 @@ For detailed API task breakdown and prioritization, see [API_BREAKDOWN.md](API_B
 4. Handle errors appropriately
 5. Write tests for new features
 
-## License
-
-This project is licensed under the MIT License.
-
-## Support
-
-For issues or questions, please create an issue in the repository or contact the development team.
 ```
